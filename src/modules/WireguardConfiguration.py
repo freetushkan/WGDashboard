@@ -124,6 +124,10 @@ class WireguardConfiguration:
                 self.__parser["Interface"]["I3"] = self.I3
                 self.__parser["Interface"]["I4"] = self.I4
                 self.__parser["Interface"]["I5"] = self.I5
+                self.__parser["Interface"]["J1"] = self.J1
+                self.__parser["Interface"]["J2"] = self.J2
+                self.__parser["Interface"]["J3"] = self.J3
+                self.__parser["Interface"]["Itime"] = self.Itime
 
             if "Backup" not in data.keys():
                 self.createDatabase()
@@ -977,7 +981,7 @@ class WireguardConfiguration:
             original = [l.rstrip("\n") for l in f.readlines()]
             allowEdit = ["Address", "PreUp", "PostUp", "PreDown", "PostDown", "ListenPort", "Table"]
             if self.Protocol == 'awg':
-                allowEdit += ["Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4", "H1", "H2", "H3", "H4", "I1", "I2", "I3", "I4", "I5"]
+                allowEdit += ["Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4", "H1", "H2", "H3", "H4", "I1", "I2", "I3", "I4", "I5", "J1", "J2", "J3", "Itime"]
             start = original.index("[Interface]")
             try:
                 end = original.index("[Peer]")

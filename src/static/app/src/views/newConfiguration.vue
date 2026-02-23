@@ -53,7 +53,11 @@ export default {
 				I2: "0",
 				I3: "0",
 				I4: "0",
-				I5: "0"
+				I5: "0",
+				J1: "0",
+				J2: "0",
+				J3: "0",
+				Itime: "0"
 			},
 			numberOfAvailableIPs: "0",
 			error: false,
@@ -388,7 +392,7 @@ export default {
 
 								<div class="card rounded-3" 
 								     v-if="this.newConfiguration.Protocol === 'awg'"
-								     v-for="key in ['Jc', 'Jmin', 'Jmax', 'S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4', 'I1', 'I2', 'I3', 'I4', 'I5']">
+								     v-for="key in ['Jc', 'Jmin', 'Jmax', 'S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4', 'I1', 'I2', 'I3', 'I4', 'I5', 'J1', 'J2', 'J3', 'Itime']">
 									<div class="card-header">{{ key }}</div>
 									<div class="card-body">
 										<input type="text"
