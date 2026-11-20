@@ -4,7 +4,7 @@ Peer
 import base64
 import datetime
 import json
-import os, subprocess, uuid, random, re
+import os, subprocess, uuid, random, re, functools
 from datetime import timedelta
 
 import sqlalchemy as db
@@ -13,6 +13,15 @@ from  flask import current_app
 from .PeerShareLink import PeerShareLink
 from .Utilities import GenerateWireguardPublicKey, CheckAddress, ValidateDNSAddress, \
     RenderSandboxedTemplate
+
+
+def _configurationLocked(func):
+    """Run a peer update under its configuration's peers lock (see WireguardConfiguration.peersLocked)"""
+    @functools.wraps(func)
+    def wrapper(self, *args, **kwargs):
+        with self.configuration.peersLock:
+            return func(self, *args, **kwargs)
+    return wrapper
 
 
 class Peer:
@@ -51,6 +60,7 @@ class Peer:
     def __repr__(self):
         return str(self.toJson())
 
+    @_configurationLocked
     def updatePeer(self, name: str,
                    private_key: str,
                    preshared_key: str,

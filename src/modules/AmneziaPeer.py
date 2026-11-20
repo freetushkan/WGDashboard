@@ -6,7 +6,7 @@ import subprocess
 import uuid
 
 from flask import current_app
-from .Peer import Peer
+from .Peer import Peer, _configurationLocked
 from .Utilities import CheckAddress, ValidateDNSAddress, GenerateWireguardPublicKey
 
 
@@ -15,6 +15,7 @@ class AmneziaPeer(Peer):
         super().__init__(tableData, configuration)
 
 
+    @_configurationLocked
     def updatePeer(self, name: str, private_key: str,
                    preshared_key: str,
                    dns_addresses: str,

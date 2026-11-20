@@ -3,7 +3,7 @@ WireGuard Configuration
 """
 from typing import Any
 
-import sqlalchemy, random, shutil, configparser, ipaddress, os, subprocess, time, re, uuid, psutil, traceback
+import sqlalchemy, random, shutil, configparser, ipaddress, os, subprocess, time, re, uuid, psutil, traceback, threading, functools
 from zipfile import ZipFile
 from datetime import datetime, timedelta
 from itertools import islice
@@ -26,6 +26,21 @@ from .WireguardConfigurationInfo import WireguardConfigurationInfo, PeerGroupsCl
 from .DashboardWebHooks import DashboardWebHooks
 
 
+def peersLocked(func):
+    """
+    Serialize everything that touches peers of one configuration.
+    Request threads and the background thread call getPeers()/addPeers()/deletePeers()
+    concurrently; without this, getPeers() could re-read the .conf file between
+    a DB commit and the following `wg-quick save` and resurrect just deleted peers
+    as nameless "Untitled" rows without private keys.
+    """
+    @functools.wraps(func)
+    def wrapper(self, *args, **kwargs):
+        with self.peersLock:
+            return func(self, *args, **kwargs)
+    return wrapper
+
+
 class WireguardConfiguration:
     class InvalidConfigurationFileException(Exception):
         def __init__(self, m):
@@ -44,6 +59,8 @@ class WireguardConfiguration:
                  startup: bool = False,
                  wg: bool = True
                  ):
+        self.peersLock = threading.RLock()
+        self.__configPeerIds: set[str] | None = None
         self.Peers = []
         self.__parser: configparser.ConfigParser = configparser.RawConfigParser(strict=False)
         self.__parser.optionxform = str
@@ -391,12 +408,14 @@ class WireguardConfiguration:
             d.remove(self.Name)
             self.DashboardConfig.SetConfig("WireGuardConfiguration", "autostart", d)
 
+    def _newPeer(self, tableData) -> Peer:
+        """Peer object factory, overridden by AmneziaConfiguration"""
+        return Peer(tableData, self)
+
     def getRestrictedPeers(self):
-        self.RestrictedPeers = []
         with self.engine.connect() as conn:
             restricted = conn.execute(self.peersRestrictedTable.select()).mappings().fetchall()
-            for i in restricted:
-                self.RestrictedPeers.append(Peer(i, self))
+        self.RestrictedPeers = [self._newPeer(i) for i in restricted]
 
     def configurationFileChanged(self) :
         mt = os.path.getmtime(self.configPath)
@@ -404,93 +423,120 @@ class WireguardConfiguration:
         self.__configFileModifiedTime = mt
         return changed
 
+    def __parseConfigurationPeers(self) -> list[dict]:
+        with open(self.configPath, 'r') as configFile:
+            content = configFile.read().split('\n')
+        if "[Peer]" not in content:
+            return []
+        p = []
+        pCounter = -1
+        content = content[content.index("[Peer]"):]
+        for i in content:
+            if not RegexMatch("#(.*)", i) and not RegexMatch(";(.*)", i):
+                if i == "[Peer]":
+                    pCounter += 1
+                    p.append({})
+                    p[pCounter]["name"] = ""
+                else:
+                    if len(i) > 0:
+                        split = re.split(r'\s*=\s*', i, 1)
+                        if len(split) == 2:
+                            p[pCounter][split[0]] = split[1]
+
+            if RegexMatch("#Name# = (.*)", i):
+                split = re.split(r'\s*=\s*', i, 1)
+                if len(split) == 2:
+                    p[pCounter]["name"] = split[1]
+        return [i for i in p if "PublicKey" in i.keys()]
+
+    def __defaultPeerData(self, i: dict) -> dict:
+        mtu = self.DashboardConfig.GetConfig("Peers", "peer_mtu")[1]
+        keepalive = self.DashboardConfig.GetConfig("Peers", "peer_keep_alive")[1]
+        return {
+            "id": i['PublicKey'],
+            "private_key": "",
+            "DNS": self.DashboardConfig.GetConfig("Peers", "peer_global_DNS")[1],
+            "endpoint_allowed_ip": self.DashboardConfig.GetConfig("Peers", "peer_endpoint_allowed_ip")[1],
+            "name": i.get("name"),
+            "total_receive": 0,
+            "total_sent": 0,
+            "total_data": 0,
+            "endpoint": "N/A",
+            "status": "stopped",
+            "latest_handshake": "N/A",
+            "allowed_ip": i.get("AllowedIPs", "N/A"),
+            "cumu_receive": 0,
+            "cumu_sent": 0,
+            "cumu_data": 0,
+            "mtu": mtu if len(mtu) > 0 else None,
+            "keepalive": keepalive if len(keepalive) > 0 else None,
+            "notes": "",
+            "remote_endpoint": self.DashboardConfig.GetConfig("Peers", "remote_endpoint")[1],
+            "preshared_key": i["PresharedKey"] if "PresharedKey" in i.keys() else ""
+        }
+
+    @peersLocked
     def getPeers(self):
-        tmpList = []        
+        """
+        The .conf file is the source of truth for which peers exist. Database rows of
+        peers that are not in the file (left over from interrupted operations) are
+        never listed; they are only reported in the log.
+        """
         if self.configurationFileChanged():
-            with open(self.configPath, 'r') as configFile:
-                p = []
-                pCounter = -1
-                content = configFile.read().split('\n')
-                try:
-                    if "[Peer]" not in content:
-                        current_app.logger.info(f"{self.Name} config has no [Peer] section")
-                        self.Peers = []
-                        return
-
-                    peerStarts = content.index("[Peer]")
-                    content = content[peerStarts:]
-                    for i in content:
-                        if not RegexMatch("#(.*)", i) and not RegexMatch(";(.*)", i):
-                            if i == "[Peer]":
-                                pCounter += 1
-                                p.append({})
-                                p[pCounter]["name"] = ""
-                            else:
-                                if len(i) > 0:
-                                    split = re.split(r'\s*=\s*', i, 1)
-                                    if len(split) == 2:
-                                        p[pCounter][split[0]] = split[1]
-
-                        if RegexMatch("#Name# = (.*)", i):
-                            split = re.split(r'\s*=\s*', i, 1)
-                            if len(split) == 2:
-                                p[pCounter]["name"] = split[1]
-                    
-                    for i in p:
-                        if "PublicKey" in i.keys():
-                            with self.engine.connect() as conn:
-                                tempPeer = conn.execute(
-                                    self.peersTable.select().where(
-                                        self.peersTable.columns.id == i['PublicKey']
-                                    )
-                                ).mappings().fetchone()
-                            
-                            if tempPeer is None:
-                                tempPeer = {
-                                    "id": i['PublicKey'],
-                                    "private_key": "",
-                                    "DNS": self.DashboardConfig.GetConfig("Peers", "peer_global_DNS")[1],
-                                    "endpoint_allowed_ip": self.DashboardConfig.GetConfig("Peers", "peer_endpoint_allowed_ip")[1],
-                                    "name": i.get("name"),
-                                    "total_receive": 0,
-                                    "total_sent": 0,
-                                    "total_data": 0,
-                                    "endpoint": "N/A",
-                                    "status": "stopped",
-                                    "latest_handshake": "N/A",
-                                    "allowed_ip": i.get("AllowedIPs", "N/A"),
-                                    "cumu_receive": 0,
-                                    "cumu_sent": 0,
-                                    "cumu_data": 0,
-                                    "mtu": self.DashboardConfig.GetConfig("Peers", "peer_mtu")[1] if len(self.DashboardConfig.GetConfig("Peers", "peer_mtu")[1]) > 0 else None,
-                                    "keepalive": self.DashboardConfig.GetConfig("Peers", "peer_keep_alive")[1] if len(self.DashboardConfig.GetConfig("Peers", "peer_keep_alive")[1]) > 0 else None,
-                                    "notes": "",
-                                    "remote_endpoint": self.DashboardConfig.GetConfig("Peers", "remote_endpoint")[1],
-                                    "preshared_key": i["PresharedKey"] if "PresharedKey" in i.keys() else ""
-                                }
-                                with self.engine.begin() as conn:
-                                    conn.execute(
-                                        self.peersTable.insert().values(tempPeer)
-                                    )                                    
-                            else:
-                                with self.engine.begin() as conn:
-                                    conn.execute(
-                                        self.peersTable.update().values({
-                                            "allowed_ip": i.get("AllowedIPs", "N/A")
-                                        }).where(
-                                            self.peersTable.columns.id == i['PublicKey']
-                                        )
-                                    )
-                            tmpList.append(Peer(tempPeer, self))
-                except Exception as e:
-                    current_app.logger.exception(f"{self.Name} getPeers() Error")
+            tmpList = []
+            try:
+                configPeers = self.__parseConfigurationPeers()
+                if len(configPeers) == 0:
+                    current_app.logger.info(f"{self.Name} config has no [Peer] section")
+                with self.engine.begin() as conn:
+                    for i in configPeers:
+                        tempPeer = conn.execute(
+                            self.peersTable.select().where(
+                                self.peersTable.columns.id == i['PublicKey']
+                            )
+                        ).mappings().fetchone()
+                        if tempPeer is None:
+                            tempPeer = self.__defaultPeerData(i)
+                            current_app.logger.warning(
+                                f"{self.Name}: peer {i['PublicKey']} found in the configuration file but not in the database, importing it without a private key")
+                            conn.execute(
+                                self.peersTable.insert().values(tempPeer)
+                            )
+                        elif tempPeer['allowed_ip'] != i.get("AllowedIPs", "N/A"):
+                            conn.execute(
+                                self.peersTable.update().values({
+                                    "allowed_ip": i.get("AllowedIPs", "N/A")
+                                }).where(
+                                    self.peersTable.columns.id == i['PublicKey']
+                                )
+                            )
+                            tempPeer = dict(tempPeer)
+                            tempPeer['allowed_ip'] = i.get("AllowedIPs", "N/A")
+                        tmpList.append(self._newPeer(tempPeer))
+                self.__configPeerIds = set(map(lambda x: x['PublicKey'], configPeers))
+                self.Peers = tmpList
+                self.__reportOrphanPeers()
+            except Exception as e:
+                # Parse again on the next call instead of trusting a half-read file
+                self.__configFileModifiedTime = None
+                current_app.logger.exception(f"{self.Name} getPeers() Error")
         else:
             with self.engine.connect() as conn:
                 existingPeers = conn.execute(self.peersTable.select()).mappings().fetchall()
-                for i in existingPeers:
-                    tmpList.append(Peer(i, self))
-        self.Peers = tmpList
-    
+            if self.__configPeerIds is not None:
+                existingPeers = [i for i in existingPeers if i['id'] in self.__configPeerIds]
+            self.Peers = [self._newPeer(i) for i in existingPeers]
+
+    def __reportOrphanPeers(self):
+        with self.engine.connect() as conn:
+            dbIds = set(conn.execute(sqlalchemy.select(self.peersTable.c.id)).scalars().all())
+        orphans = sorted(dbIds - self.__configPeerIds)
+        if orphans and orphans != getattr(self, '_orphansReported', None):
+            current_app.logger.warning(
+                f"{self.Name}: {len(orphans)} peer(s) exist in the database but not in the configuration file "
+                f"and are hidden: {', '.join(orphans)}")
+        self._orphansReported = orphans
+
     def logPeersTraffic(self):
         with self.engine.begin() as conn:
             for tempPeer in self.Peers:
@@ -530,24 +576,60 @@ class WireguardConfiguration:
                                     "time": datetime.now()
                                 })
                             )
-                          
+
+    def __wgSetPeer(self, publicKey: str, allowedIPs: str, presharedKey: str):
+        presharedKeyExist = len(presharedKey) > 0
+        uid = str(uuid.UUID(int=random.Random().getrandbits(128), version=4))
+        if presharedKeyExist:
+            with open(uid, "w+") as f:
+                f.write(presharedKey)
+        try:
+            command = [self.Protocol, "set", self.Name, "peer", publicKey, "allowed-ips", allowedIPs,
+                       "preshared-key", uid if presharedKeyExist else "/dev/null"]
+            subprocess.check_output(command, stderr=subprocess.STDOUT)
+        finally:
+            if presharedKeyExist and os.path.exists(uid):
+                os.remove(uid)
+
+    def __wgRemovePeer(self, publicKey: str) -> bool:
+        try:
+            subprocess.check_output([self.Protocol, "set", self.Name, "peer", publicKey, "remove"],
+                                    stderr=subprocess.STDOUT)
+            return True
+        except subprocess.CalledProcessError as e:
+            current_app.logger.error(f"{self.Name}: failed to remove peer {publicKey}: {e.output.decode(errors='replace').strip()}")
+            return False
+
+    @peersLocked
     def addPeers(self, peers: list) -> tuple[bool, list, str]:
         result = {
             "message": None,
             "peers": []
         }
-        try:
-            cleanedAllowedIPs = {}
-            for p in peers:
-                newAllowedIPs = p['allowed_ip'].replace(" ", "")
-                if not CheckAddress(newAllowedIPs):
-                    return False, [], "Allowed IPs entry format is incorrect"
-                if not CheckPeerKey(p["id"]):
-                    return False, [], "Peer key format is incorrect"
-                cleanedAllowedIPs[p["id"]] = newAllowedIPs
+        cleanedAllowedIPs = {}
+        for p in peers:
+            newAllowedIPs = p['allowed_ip'].replace(" ", "")
+            if not CheckAddress(newAllowedIPs):
+                return False, [], "Allowed IPs entry format is incorrect"
+            if not CheckPeerKey(p["id"]):
+                return False, [], "Peer key format is incorrect"
+            cleanedAllowedIPs[p["id"]] = newAllowedIPs
 
+        self.getPeers()
+        for p in peers:
+            if self.searchPeer(p['id'])[0]:
+                return False, [], f"Peer {p['id']} already exists"
+
+        applied = []
+        try:
+            # Database first: if anything below fails, a peer that is in the .conf
+            # file always has its row (and private key) in the database
             with self.engine.begin() as conn:
                 for i in peers:
+                    # Stale row of a peer that is not in the configuration file anymore
+                    conn.execute(
+                        self.peersTable.delete().where(self.peersTable.columns.id == i['id'])
+                    )
                     newPeer = {
                         "id": i['id'],
                         "private_key": i['private_key'],
@@ -574,21 +656,12 @@ class WireguardConfiguration:
                         self.peersTable.insert().values(newPeer)
                     )
             for p in peers:
-                presharedKeyExist = len(p['preshared_key']) > 0
-                rd = random.Random()
-                uid = str(uuid.UUID(int=rd.getrandbits(128), version=4))
-                if presharedKeyExist:
-                    with open(uid, "w+") as f:
-                        f.write(p['preshared_key'])
+                self.__wgSetPeer(p['id'], cleanedAllowedIPs[p["id"]], p['preshared_key'])
+                applied.append(p['id'])
 
-                command = [self.Protocol, "set", self.Name, "peer", p['id'], "allowed-ips", cleanedAllowedIPs[p["id"]], "preshared-key", uid if presharedKeyExist else "/dev/null"]
-                subprocess.check_output(command, stderr=subprocess.STDOUT)
-
-                if presharedKeyExist:
-                    os.remove(uid)
-
-            command = [f"{self.Protocol}-quick", "save", self.Name]
-            subprocess.check_output(command, stderr=subprocess.STDOUT)
+            status, msg = self.__wgSave()
+            if not status:
+                raise RuntimeError("Failed to save configuration through WireGuard")
 
             self.getPeers()
             for p in peers:
@@ -601,6 +674,19 @@ class WireguardConfiguration:
             })
         except Exception as e:
             current_app.logger.exception("Add peers error")
+            # Roll back what did not make it into WireGuard, keep the rest consistent
+            try:
+                notApplied = [p['id'] for p in peers if p['id'] not in applied]
+                if notApplied:
+                    with self.engine.begin() as conn:
+                        conn.execute(
+                            self.peersTable.delete().where(self.peersTable.columns.id.in_(notApplied))
+                        )
+                if applied:
+                    self.__wgSave()
+                self.getPeers()
+            except Exception:
+                current_app.logger.exception("Add peers rollback error")
             return False, [], "Internal server error"
         return True, result['peers'], ""
 
@@ -610,144 +696,173 @@ class WireguardConfiguration:
                 return True, i
         return False, None
 
+    @peersLocked
     def allowAccessPeers(self, listOfPublicKeys) -> tuple[bool, str]:
         if not self.getStatus():
             self.toggleConfiguration()
-        with self.engine.begin() as conn:
+
+        restrictedPeers = []
+        with self.engine.connect() as conn:
             for i in listOfPublicKeys:
-                stmt = self.peersRestrictedTable.select().where(
-                    self.peersRestrictedTable.columns.id == i
-                )
-                restrictedPeer = conn.execute(stmt).mappings().fetchone()
-                if restrictedPeer is not None:
-                    conn.execute(
-                        self.peersTable.insert().from_select(
-                            [c.name for c in self.peersTable.columns],
-                            stmt
-                        )
-                    )
-                    conn.execute(
-                        self.peersRestrictedTable.delete().where(
-                            self.peersRestrictedTable.columns.id == i
-                        )
-                    )
-
-                    presharedKeyExist = len(restrictedPeer['preshared_key']) > 0
-                    rd = random.Random()
-                    uid = str(uuid.UUID(int=rd.getrandbits(128), version=4))
-                    if presharedKeyExist:
-                        with open(uid, "w+") as f:
-                            f.write(restrictedPeer['preshared_key'])
-
-                    newAllowedIPs = restrictedPeer['allowed_ip'].replace(" ", "")
-                    if not CheckAddress(newAllowedIPs):
-                        return False, "Allowed IPs entry format is incorrect"
-
-                    if not CheckPeerKey(restrictedPeer["id"]):
-                        return False, "Peer key format is incorrect"
-
-                    command = [self.Protocol, "set", self.Name, "peer", restrictedPeer["id"], "allowed-ips", newAllowedIPs, "preshared-key", uid if presharedKeyExist else "/dev/null"]
-                    subprocess.check_output(command, stderr=subprocess.STDOUT)
-
-                    if presharedKeyExist: os.remove(uid)
-                else:
+                restrictedPeer = conn.execute(
+                    self.peersRestrictedTable.select().where(self.peersRestrictedTable.columns.id == i)
+                ).mappings().fetchone()
+                if restrictedPeer is None:
                     return False, "Failed to allow access of peer " + i
-        if not self.__wgSave():
+                if not CheckAddress(restrictedPeer['allowed_ip'].replace(" ", "")):
+                    return False, "Allowed IPs entry format is incorrect"
+                if not CheckPeerKey(restrictedPeer["id"]):
+                    return False, "Peer key format is incorrect"
+                restrictedPeers.append(restrictedPeer)
+
+        # Move rows first so that a peer appearing in the .conf file always has its row
+        with self.engine.begin() as conn:
+            for restrictedPeer in restrictedPeers:
+                stmt = self.peersRestrictedTable.select().where(
+                    self.peersRestrictedTable.columns.id == restrictedPeer['id']
+                )
+                conn.execute(
+                    self.peersTable.delete().where(self.peersTable.columns.id == restrictedPeer['id'])
+                )
+                conn.execute(
+                    self.peersTable.insert().from_select(
+                        [c.name for c in self.peersTable.columns],
+                        stmt
+                    )
+                )
+                conn.execute(
+                    self.peersRestrictedTable.delete().where(
+                        self.peersRestrictedTable.columns.id == restrictedPeer['id']
+                    )
+                )
+        try:
+            for restrictedPeer in restrictedPeers:
+                self.__wgSetPeer(restrictedPeer["id"], restrictedPeer['allowed_ip'].replace(" ", ""),
+                                 restrictedPeer['preshared_key'])
+        except subprocess.CalledProcessError as e:
+            current_app.logger.error(f"{self.Name}: failed to allow access: {e.output.decode(errors='replace').strip()}")
+            self.__wgSave()
+            self.getPeers()
+            return False, "Failed to allow access of peer(s)"
+
+        status, msg = self.__wgSave()
+        if not status:
             return False, "Failed to save configuration through WireGuard"
         self.getPeers()
         return True, "Allow access successfully"
 
+    @peersLocked
     def restrictPeers(self, listOfPublicKeys) -> tuple[bool, str]:
-        numOfRestrictedPeers = 0
         numOfFailedToRestrictPeers = 0
         if not self.getStatus():
             self.toggleConfiguration()
+        self.getPeers()
 
-        with self.engine.begin() as conn:
-            for p in listOfPublicKeys:
-                found, pf = self.searchPeer(p)
-                if found:
-                    try:
-                        command = [self.Protocol, "set", self.Name, "peer", pf.id, "remove"]
-                        subprocess.check_output(command, stderr=subprocess.STDOUT)
+        removed = []
+        for p in listOfPublicKeys:
+            found, pf = self.searchPeer(p)
+            if found and self.__wgRemovePeer(pf.id):
+                removed.append(pf.id)
+            else:
+                numOfFailedToRestrictPeers += 1
 
-                        conn.execute(
-                            self.peersRestrictedTable.insert().from_select(
-                                [c.name for c in self.peersTable.columns],
-                                self.peersTable.select().where(
-                                    self.peersTable.columns.id == pf.id
-                                )
+        if removed:
+            # Persist the .conf file before touching the database, otherwise getPeers()
+            # could see the peer in the file without its row and re-import it as "Untitled"
+            status, msg = self.__wgSave()
+            if not status:
+                return False, "Failed to save configuration through WireGuard"
+            with self.engine.begin() as conn:
+                for peerId in removed:
+                    conn.execute(
+                        self.peersRestrictedTable.delete().where(self.peersRestrictedTable.columns.id == peerId)
+                    )
+                    conn.execute(
+                        self.peersRestrictedTable.insert().from_select(
+                            [c.name for c in self.peersTable.columns],
+                            self.peersTable.select().where(
+                                self.peersTable.columns.id == peerId
                             )
                         )
-                        conn.execute(
-                            self.peersRestrictedTable.update().values({
-                                "status": "stopped"
-                            }).where(
-                                self.peersRestrictedTable.columns.id == pf.id
-                            )
+                    )
+                    conn.execute(
+                        self.peersRestrictedTable.update().values({
+                            "status": "stopped"
+                        }).where(
+                            self.peersRestrictedTable.columns.id == peerId
                         )
-                        conn.execute(
-                            self.peersTable.delete().where(
-                                self.peersTable.columns.id == pf.id
-                            )
+                    )
+                    conn.execute(
+                        self.peersTable.delete().where(
+                            self.peersTable.columns.id == peerId
                         )
-                        numOfRestrictedPeers += 1
-                    except Exception as e:
-                        traceback.print_stack()
-                        numOfFailedToRestrictPeers += 1
+                    )
 
-        if not self.__wgSave():
-            return False, "Failed to save configuration through WireGuard"
         self.getRestrictedPeers()
         self.getPeers()
+        numOfRestrictedPeers = len(removed)
         if numOfRestrictedPeers == len(listOfPublicKeys):
             return True, f"Restricted {numOfRestrictedPeers} peer(s)"
         return False, f"Restricted {numOfRestrictedPeers} peer(s) successfully. Failed to restrict {numOfFailedToRestrictPeers} peer(s)"
 
-
+    @peersLocked
     def deletePeers(self, listOfPublicKeys, AllPeerJobs: PeerJobs, AllPeerShareLinks: PeerShareLinks) -> tuple[bool, str]:
-        numOfDeletedPeers = 0
         numOfFailedToDeletePeers = 0
-        deleted = []
+        numOfNotFoundPeers = 0
         if not self.getStatus():
             self.toggleConfiguration()
-        with self.engine.begin() as conn:
-            for p in listOfPublicKeys:
-                found, pf = self.searchPeer(p)
+        self.getPeers()
+
+        removed = []
+        for p in listOfPublicKeys:
+            found, pf = self.searchPeer(p)
+            if not found:
+                numOfNotFoundPeers += 1
+                continue
+            if self.__wgRemovePeer(pf.id):
+                removed.append(pf)
+            else:
+                numOfFailedToDeletePeers += 1
+
+        if removed:
+            # Persist the .conf file before deleting rows, otherwise getPeers() could see the
+            # peer in the file without its row and re-import it as "Untitled" without a key
+            status, msg = self.__wgSave()
+            if not status:
+                return False, "Failed to save configuration through WireGuard"
+            with self.engine.begin() as conn:
+                for pf in removed:
+                    conn.execute(
+                        self.peersTable.delete().where(
+                            self.peersTable.columns.id == pf.id
+                        )
+                    )
+            for pf in removed:
                 for job in pf.jobs:
                     AllPeerJobs.deleteJob(job)
                 for shareLink in pf.ShareLink:
                     AllPeerShareLinks.updateLinkExpireDate(shareLink.ShareID, datetime.now())
-                if found:
-                    try:
-                        subprocess.check_output(f"{self.Protocol} set {self.Name} peer {pf.id} remove",
-                                                shell=True, stderr=subprocess.STDOUT)
-                        conn.execute(
-                            self.peersTable.delete().where(
-                                self.peersTable.columns.id == pf.id
-                            )
-                        )
-                        deleted.append(pf.id)
-                        numOfDeletedPeers += 1
-                    except Exception as e:
-                        numOfFailedToDeletePeers += 1
-
-        if not self.__wgSave():
-            return False, "Failed to save configuration through WireGuard"
 
         self.getPeers()
-        
+        numOfDeletedPeers = len(removed)
+        deleted = [pf.id for pf in removed]
+
         if numOfDeletedPeers == 0 and numOfFailedToDeletePeers == 0:
             return False, "No peer(s) to delete found"
-        
+
         if numOfDeletedPeers == len(listOfPublicKeys):
             self.DashboardWebHooks.RunWebHook("peer_deleted", {
                 "configuration": self.Name,
                 "peers": deleted
             })
             return True, f"Deleted {numOfDeletedPeers} peer(s)"
-        
-        return False, f"Deleted {numOfDeletedPeers} peer(s) successfully. Failed to delete {numOfFailedToDeletePeers} peer(s)"
+
+        if deleted:
+            self.DashboardWebHooks.RunWebHook("peer_deleted", {
+                "configuration": self.Name,
+                "peers": deleted
+            })
+        return False, f"Deleted {numOfDeletedPeers} peer(s) successfully. Failed to delete {numOfFailedToDeletePeers + numOfNotFoundPeers} peer(s)"
 
     def __wgSave(self) -> tuple[bool, str] | tuple[bool, None]:
         try:
@@ -878,6 +993,7 @@ class WireguardConfiguration:
                 )
                 count += 2
 
+    @peersLocked
     def toggleConfiguration(self) -> tuple[bool, str] | tuple[bool, None]:
         self.getStatus()
         if self.Status:
