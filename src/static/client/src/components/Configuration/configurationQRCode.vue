@@ -18,8 +18,9 @@ const amneziaVPN = computed(() => {
 })
 
 const download = computed(() => {
+	// application/octet-stream: mobile Safari opens text types in the tab instead of downloading them
 	return URL.createObjectURL(new Blob([props.qrcodeData.file], {
-		type: 'text/conf'
+		type: 'application/octet-stream'
 	}))
 })
 </script>

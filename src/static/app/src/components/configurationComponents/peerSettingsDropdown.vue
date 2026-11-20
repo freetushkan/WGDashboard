@@ -1,5 +1,6 @@
 <script>
 import {fetchGet, fetchPost} from "@/utilities/fetch.js";
+import {downloadFile} from "@/utilities/download.js";
 import {DashboardConfigurationStore} from "@/stores/DashboardConfigurationStore.js";
 import LocaleText from "@/components/text/localeText.vue";
 import PeerSettingsDropdownTool
@@ -36,13 +37,7 @@ export default {
 				id: this.Peer.id
 			}, (res) => {
 				if (res.status){
-					const blob = new Blob([res.data.file], { type: "text/conf" });
-					const jsonObjectUrl = URL.createObjectURL(blob);
-					const filename = `${res.data.fileName}.conf`;
-					const anchorEl = document.createElement("a");
-					anchorEl.href = jsonObjectUrl;
-					anchorEl.download = filename;
-					anchorEl.click();
+					downloadFile(res.data.file, `${res.data.fileName}.conf`);
 					this.dashboardStore.newMessage("WGDashboard", "Peer download started", "success")
 				}else{
 					this.dashboardStore.newMessage("Server", res.message, "danger")

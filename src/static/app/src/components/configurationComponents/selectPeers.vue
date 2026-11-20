@@ -2,6 +2,7 @@
 import LocaleText from "@/components/text/localeText.vue";
 import {computed, reactive, ref, useTemplateRef, watch} from "vue";
 import {fetchGet, fetchPost} from "@/utilities/fetch.js";
+import {downloadFile} from "@/utilities/download.js";
 import {useRoute} from "vue-router";
 import {DashboardConfigurationStore} from "@/stores/DashboardConfigurationStore.js";
 
@@ -78,13 +79,7 @@ const submitDownload = async () => {
 			id: x
 		}, (res) => {
 			if (res.status){
-				const blob = new Blob([res.data.file], { type: "text/plain" });
-				const jsonObjectUrl = URL.createObjectURL(blob);
-				const filename = `${res.data.fileName}.conf`;
-				const anchorEl = document.createElement("a");
-				anchorEl.href = jsonObjectUrl;
-				anchorEl.download = filename;
-				anchorEl.click();
+				downloadFile(res.data.file, `${res.data.fileName}.conf`);
 				downloaded.success.push(x)
 			}else{
 				downloaded.failed.push(x)

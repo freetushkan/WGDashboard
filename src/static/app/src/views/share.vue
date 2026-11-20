@@ -2,6 +2,7 @@
 import {useRoute} from "vue-router";
 import {DashboardConfigurationStore} from "@/stores/DashboardConfigurationStore.js";
 import {fetchGet} from "@/utilities/fetch.js";
+import {downloadFile} from "@/utilities/download.js";
 import {ref} from "vue";
 import QRCode from "qrcode";
 import LocaleText from "@/components/text/localeText.vue";
@@ -48,13 +49,7 @@ export default {
 	},
 	methods:{
 		download(){
-			const blob = new Blob([this.peerConfiguration.file], { type: "text/plain" });
-			const jsonObjectUrl = URL.createObjectURL(blob);
-			const filename = `${this.peerConfiguration.fileName}.conf`;
-			const anchorEl = document.createElement("a");
-			anchorEl.href = jsonObjectUrl;
-			anchorEl.download = filename;
-			anchorEl.click();
+			downloadFile(this.peerConfiguration.file, `${this.peerConfiguration.fileName}.conf`);
 		}
 	},
 	computed:{
