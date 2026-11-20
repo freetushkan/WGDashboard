@@ -580,7 +580,29 @@ update_wgd() {
     _installPythonVenv
     _installPythonPip
 
-    new_ver=$($venv_python -c "import json; import urllib.request; data = urllib.request.urlopen('https://api.github.com/repos/WGDashboard/WGDashboard/releases/latest').read(); output = json.loads(data);print(output['tag_name'])")
+    # Update source, from the environment or from ./wgd-update.conf (shell KEY=value lines, ignored by git):
+    #   WGD_REPO=owner/repo  - GitHub repository to update from (default: WGDashboard/WGDashboard)
+    #   WGD_BRANCH=main      - pull this branch instead of the latest release tag
+    if [ -f ./wgd-update.conf ]; then
+        local env_repo="$WGD_REPO" env_branch="$WGD_BRANCH"
+        . ./wgd-update.conf
+        WGD_REPO=${env_repo:-$WGD_REPO}
+        WGD_BRANCH=${env_branch:-$WGD_BRANCH}
+    fi
+    local update_repo=${WGD_REPO:-WGDashboard/WGDashboard}
+
+    if [ -n "$WGD_BRANCH" ]; then
+        new_ver=$WGD_BRANCH
+    else
+        new_ver=$($venv_python -c "import json; import urllib.request; data = urllib.request.urlopen('https://api.github.com/repos/${update_repo}/releases/latest').read(); output = json.loads(data);print(output['tag_name'])")
+    fi
+    if [ -z "$new_ver" ]; then
+        printf "[WGDashboard] %s Could not determine the version to update to from %s\n" "$heavy_crossmark" "$update_repo"
+        return 1
+    fi
+    if [ "$update_repo" != "WGDashboard/WGDashboard" ] || [ -n "$WGD_BRANCH" ]; then
+        printf "[WGDashboard] Update source: %s, %s %s\n" "$update_repo" "$([ -n "$WGD_BRANCH" ] && echo branch || echo release)" "$new_ver"
+    fi
 
     if [ "$commandConfirmed" = "true" ]; then
         printf "[WGDashboard] Confirmation granted.\n"
@@ -599,7 +621,7 @@ update_wgd() {
 
         mv wgd.sh wgd.sh.old
         printf "[WGDashboard] Downloading %s from GitHub..." "$new_ver"
-        { date; git stash; git pull https://github.com/WGDashboard/WGDashboard.git $new_ver --force; } >> ./log/update.txt
+        { date; git stash; git pull "https://github.com/${update_repo}.git" "$new_ver" --force; } >> ./log/update.txt
         chmod +x ./wgd.sh
         sudo ./wgd.sh install
         printf "[WGDashboard] Update completed!\n"

@@ -55,3 +55,4 @@ coverage
 
 *.tsbuildinfo
 .vite/*
+src/wgd-update.conf
