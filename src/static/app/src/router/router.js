@@ -3,12 +3,11 @@ import {fetchGet} from "@/utilities/fetch.js";
 import {WireguardConfigurationsStore} from "@/stores/WireguardConfigurationsStore.js";
 import {DashboardConfigurationStore} from "@/stores/DashboardConfigurationStore.js";
 
+// true / false - server answered; undefined - server unreachable
 const checkAuth = async () => {
-	let result = false
-	await fetchGet("/api/validateAuthentication", {}, (res) => {
-		result = res.status
-	});
-	return result;
+	const res = await fetchGet("/api/validateAuthentication", {});
+	if (res?.networkError) return undefined;
+	return res?.status === true;
 }
 
 const router = createRouter({
@@ -202,7 +201,13 @@ router.beforeEach(async (to, from, next) => {
 	document.querySelector(".loadingBar").classList.add("loading")
 	if (to.meta.requiresAuth){
 		if (!dashboardConfigurationStore.getActiveCrossServer()){
-			if (await checkAuth()){
+			const authenticated = await checkAuth()
+			if (authenticated === undefined && from.matched.length > 0){
+				// Server is temporarily unreachable: stay where we are instead of signing out
+				next(false)
+				return
+			}
+			if (authenticated){
 				await dashboardConfigurationStore.getConfiguration()
 				if (!wireguardConfigurationsStore.Configurations && to.name !== "Configuration List"){
 					await wireguardConfigurationsStore.getConfigurations();
@@ -212,7 +217,8 @@ router.beforeEach(async (to, from, next) => {
 			}else{
 				dashboardConfigurationStore.Redirect = to;
 				next("/signin")
-				dashboardConfigurationStore.newMessage("WGDashboard", "Sign in session ended, please sign in again", "warning")
+				if (authenticated === false)
+					dashboardConfigurationStore.newMessage("WGDashboard", "Sign in session ended, please sign in again", "warning")
 			}
 		}else{
 			await dashboardConfigurationStore.getConfiguration()

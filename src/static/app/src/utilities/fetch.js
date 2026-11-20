@@ -40,95 +40,104 @@ export const getUrl = (url) => {
 	return `./.${url}`;
 }
 
-export const fetchGet = async (url, params=undefined, callback=undefined) => {
-	const urlSearchParams = new URLSearchParams(params);
-	await fetch(`${getUrl(url)}?${urlSearchParams.toString()}`, {
-		headers: getHeaders()
-	})
-		.then((x) => {
-			const store = DashboardConfigurationStore();
-			if (!x.ok){
-				if (x.status !== 200){
-					if (x.status === 401){
-						store.newMessage("WGDashboard", "Sign in session ended, please sign in again", "warning")
-					}
-					throw new Error(x.statusText)
-				}
-			}else{
-				return x.json()
-			}
-		})
-		.then(x => callback ? callback(x) : undefined).catch(x => {
-			console.log("Error:", x)
-			router.push({path: '/signin'})
-	})
+const NETWORK_ERROR = "Cannot reach WGDashboard server, please try again"
+const ERROR_TOAST_INTERVAL = 10000
+let lastErrorToast = {content: "", time: 0}
+let redirectingToSignIn = false
+
+// Show an error toast, but do not flood the UI while the server is down and polling keeps failing
+const notifyError = (content) => {
+	const now = Date.now()
+	if (lastErrorToast.content === content && now - lastErrorToast.time < ERROR_TOAST_INTERVAL) return
+	lastErrorToast = {content, time: now}
+	try{
+		DashboardConfigurationStore().newMessage("WGDashboard", content, "danger")
+	}catch (e){}
 }
 
-export const fetchPost = async (url, body, callback) => {
-	await fetch(`${getUrl(url)}`, {
-		headers: getHeaders(),
-		method: "POST",
-		body: JSON.stringify(body)
-	}).then((x) => {
-		const store = DashboardConfigurationStore();
-		if (!x.ok){
-			if (x.status !== 200){
-				if (x.status === 401){
-					store.newMessage("WGDashboard", "Sign in session ended, please sign in again", "warning")
-				}
-				throw new Error(x.statusText)
-			}
-		}else{
-			return x.json()
-		}
-	}).then(x => callback ? callback(x) : undefined).catch(x => {
-		console.log("Error:", x)
-		router.push({path: '/signin'})
-	})
+// Only a real 401 from the server ends the session; remember where we were to come back after sign in
+const sessionEnded = () => {
+	const current = router.currentRoute.value
+	if (redirectingToSignIn || current.path === '/signin') return
+	redirectingToSignIn = true
+	try{
+		const store = DashboardConfigurationStore()
+		if (current.meta?.requiresAuth) store.Redirect = current
+		store.newMessage("WGDashboard", "Sign in session ended, please sign in again", "warning")
+	}catch (e){}
+	router.push({path: '/signin'}).finally(() => { redirectingToSignIn = false })
 }
 
-export const fetchPut = async (url, body, callback) => {
-	await fetch(`${getUrl(url)}`, {
-		headers: getHeaders(),
-		method: "PUT",
-		body: JSON.stringify(body)
-	}).then((x) => {
-		const store = DashboardConfigurationStore();
-		if (!x.ok){
-			if (x.status !== 200){
-				if (x.status === 401){
-					store.newMessage("WGDashboard", "Sign in session ended, please sign in again", "warning")
-				}
-				throw new Error(x.statusText)
-			}
-		}else{
-			return x.json()
-		}
-	}).then(x => callback ? callback(x) : undefined).catch(x => {
-		console.log("Error:", x)
-		router.push({path: '/signin'})
-	})
+const runCallback = async (callback, data) => {
+	if (!callback) return
+	try{
+		await callback(data)
+	}catch (e){
+		console.error("Error in request callback:", e)
+	}
 }
 
-export const fetchDelete = async (url, body, callback) => {
-	await fetch(`${getUrl(url)}`, {
-		headers: getHeaders(),
-		method: "DELETE",
-		body: JSON.stringify(body)
-	}).then((x) => {
-		const store = DashboardConfigurationStore();
-		if (!x.ok){
-			if (x.status !== 200){
-				if (x.status === 401){
-					store.newMessage("WGDashboard", "Sign in session ended, please sign in again", "warning")
-				}
-				throw new Error(x.statusText)
-			}
+/*
+ * Returns the parsed response body. On a transport/HTTP error it returns
+ * {status: false, message, data: null, networkError: true} instead of
+ * kicking the user out to the sign in page.
+ *  - GET: callback is skipped on error (polling keeps the last good data), a toast is shown
+ *  - POST/PUT/DELETE: callback receives the error object, so the caller can reset its
+ *    spinners and show the message; if there is no callback, a toast is shown
+ */
+const request = async (method, url, {params, body} = {}, callback = undefined) => {
+	let fullUrl = getUrl(url)
+	if (method === "GET") fullUrl += `?${new URLSearchParams(params).toString()}`
+	const init = {headers: getHeaders(), method}
+	if (method !== "GET") init.body = JSON.stringify(body)
+
+	let message
+	let unauthorized = false
+	try{
+		const res = await fetch(fullUrl, init)
+		if (res.status === 401){
+			unauthorized = true
+			message = "Sign in session ended, please sign in again"
+		}else if (!res.ok){
+			message = `Server error: ${res.status} ${res.statusText}`.trim()
 		}else{
-			return x.json()
+			let data
+			try{
+				data = await res.json()
+			}catch (e){
+				message = "Invalid response from server"
+			}
+			if (message === undefined){
+				await runCallback(callback, data)
+				return data
+			}
 		}
-	}).then(x => callback ? callback(x) : undefined).catch(x => {
-		console.log("Error:", x)
-		router.push({path: '/signin'})
-	})
+	}catch (e){
+		console.log("Error:", e)
+		message = NETWORK_ERROR
+	}
+
+	const result = {status: false, message, data: null, networkError: true}
+	if (unauthorized){
+		sessionEnded()
+		return result
+	}
+	if (method !== "GET" && callback){
+		await runCallback(callback, result)
+	}else{
+		notifyError(message)
+	}
+	return result
 }
+
+export const fetchGet = async (url, params=undefined, callback=undefined) =>
+	request("GET", url, {params}, callback)
+
+export const fetchPost = async (url, body, callback) =>
+	request("POST", url, {body}, callback)
+
+export const fetchPut = async (url, body, callback) =>
+	request("PUT", url, {body}, callback)
+
+export const fetchDelete = async (url, body, callback) =>
+	request("DELETE", url, {body}, callback)
