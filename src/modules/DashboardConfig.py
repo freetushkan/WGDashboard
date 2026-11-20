@@ -192,7 +192,7 @@ class DashboardConfig:
                     fKeys.append(DashboardAPIKey(k[0], k[1].strftime("%Y-%m-%d %H:%M:%S"), (k[2].strftime("%Y-%m-%d %H:%M:%S") if k[2] else None)))
                 return fKeys
         except Exception as e:
-            current_app.logger.error("API Keys error", e)
+            current_app.logger.exception("API Keys error")
         return []
 
     def createAPIKeys(self, ExpiredAt = None):

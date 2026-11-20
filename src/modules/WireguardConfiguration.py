@@ -483,7 +483,7 @@ class WireguardConfiguration:
                                     )
                             tmpList.append(Peer(tempPeer, self))
                 except Exception as e:
-                    current_app.logger.error(f"{self.Name} getPeers() Error", e)
+                    current_app.logger.exception(f"{self.Name} getPeers() Error")
         else:
             with self.engine.connect() as conn:
                 existingPeers = conn.execute(self.peersTable.select()).mappings().fetchall()
@@ -600,7 +600,7 @@ class WireguardConfiguration:
                 "peers": list(map(lambda k : k['id'], peers))
             })
         except Exception as e:
-            current_app.logger.error("Add peers error", e)
+            current_app.logger.exception("Add peers error")
             return False, [], "Internal server error"
         return True, result['peers'], ""
 
@@ -1138,7 +1138,7 @@ class WireguardConfiguration:
                         check = ipaddress.ip_network(ppip[0])
                         existedAddress.add(check)
                     except Exception as e:
-                        current_app.logger.error(f"{self.Name} peer {p.id} have invalid ip", e)
+                        current_app.logger.exception(f"{self.Name} peer {p.id} have invalid ip")
         configurationAddresses = self.Address.split(',')
         for ca in configurationAddresses:
             ca = ca.strip()
@@ -1152,7 +1152,7 @@ class WireguardConfiguration:
                         if p.version == network.version and p.subnet_of(network):
                             availableAddress[ca] -= 1
             except Exception as e:
-                current_app.logger.error(f"Error: Failed to parse IP address {ca} from {self.Name}", e)
+                current_app.logger.exception(f"Error: Failed to parse IP address {ca} from {self.Name}")
         return True, availableAddress
 
     def getAvailableIP(self, threshold = 255):
@@ -1169,7 +1169,7 @@ class WireguardConfiguration:
                         check = ipaddress.ip_network(ppip[0])
                         existedAddress.add(check.compressed)
                     except Exception as e:
-                        current_app.logger.error(f"{self.Name} peer {p.id} have invalid ip", e)
+                        current_app.logger.exception(f"{self.Name} peer {p.id} have invalid ip")
         configurationAddresses = self.Address.split(',')
         for ca in configurationAddresses:
             ca = ca.strip()
@@ -1185,7 +1185,7 @@ class WireguardConfiguration:
                         availableAddress[ca] = list(islice(filter(lambda ip : ip not in existedAddress,
                                                                   map(lambda iph : ipaddress.ip_network(iph).compressed, network.hosts())), threshold))
             except Exception as e:
-                current_app.logger.error(f"Failed to parse IP address {ca} from {self.Name}", e)
+                current_app.logger.exception(f"Failed to parse IP address {ca} from {self.Name}")
         return True, availableAddress
 
     def getRealtimeTrafficUsage(self):

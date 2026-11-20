@@ -255,7 +255,7 @@ class AmneziaConfiguration(WireguardConfiguration):
                                     )
                                 self.Peers.append(AmneziaPeer(tempPeer, self))
                 except Exception as e:
-                    current_app.logger.error(f"{self.Name} getPeers() Error", e)
+                    current_app.logger.exception(f"{self.Name} getPeers() Error")
         else:
             with self.engine.connect() as conn:
                 existingPeers = conn.execute(self.peersTable.select()).mappings().fetchall()
@@ -331,7 +331,7 @@ class AmneziaConfiguration(WireguardConfiguration):
                 "peers": list(map(lambda k : k['id'], peers))
             })
         except Exception as e:
-            current_app.logger.error("Add peers error", e)
+            current_app.logger.exception("Add peers error")
             return False, [], "Internal server error"
         return True, result['peers'], ""
 

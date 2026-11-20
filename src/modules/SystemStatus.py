@@ -43,13 +43,13 @@ class CPU:
         try:
             self.cpu_percent = psutil.cpu_percent(interval=1)
         except Exception as e:
-            current_app.logger.error("Get CPU Percent error", e)
+            current_app.logger.exception("Get CPU Percent error")
     
     def getPerCPUPercent(self):
         try:
             self.cpu_percent_per_cpu = psutil.cpu_percent(interval=1, percpu=True)
         except Exception as e:
-            current_app.logger.error("Get Per CPU Percent error", e)
+            current_app.logger.exception("Get Per CPU Percent error")
     
     def toJson(self):
         return self.__dict__
@@ -72,7 +72,7 @@ class Memory:
             
             self.percent = memory.percent
         except Exception as e:
-            current_app.logger.error("Get Memory percent error", e)
+            current_app.logger.exception("Get Memory percent error")
     def toJson(self):
         self.getData()
         return self.__dict__
@@ -84,7 +84,7 @@ class Disks:
         try:
             self.disks = list(map(lambda x : Disk(x.mountpoint), psutil.disk_partitions()))
         except Exception as e:
-            current_app.logger.error("Get Disk percent error", e)
+            current_app.logger.exception("Get Disk percent error")
     def toJson(self):
         self.getData()
         return self.disks
@@ -104,7 +104,7 @@ class Disk:
             self.used = disk.used
             self.percent = disk.percent
         except Exception as e:
-            current_app.logger.error("Get Disk percent error", e)
+            current_app.logger.exception("Get Disk percent error")
     def toJson(self):
         self.getData()
         return self.__dict__
@@ -141,7 +141,7 @@ class NetworkInterfaces:
                     'recv': round((network[i].bytes_recv - self.interfaces[i]['bytes_recv']) / 1024 / 1024, 4)
                 }
         except Exception as e:
-            current_app.logger.error("Get network error", e)
+            current_app.logger.exception("Get network error")
 
     def toJson(self):
         return self.interfaces
@@ -194,7 +194,7 @@ class Processes:
             self.Memory_Top_10_Processes = mem_sorted[:20]
 
         except Exception as e:
-            current_app.logger.error("Get processes error", e)
+            current_app.logger.exception("Get processes error")
 
     def toJson(self):
         self.getData()
